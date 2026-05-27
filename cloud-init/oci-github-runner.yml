@@ -1,0 +1,127 @@
+#cloud-config
+#
+# Oracle Cloud / cloud-init template for the JP self-hosted GitHub Actions runner.
+#
+# This prepares the VM, downloads the runner, and adds the reboot cron. It does
+# not check out this repo; GitHub Actions does that with actions/checkout inside
+# the workflow. It does not register with GitHub because runner registration
+# tokens are short-lived; generate one from:
+#   Repository -> Settings -> Actions -> Runners -> New self-hosted runner
+#
+# After the VM boots, check progress with:
+#   sudo tail -f /var/log/cloud-init-output.log
+
+package_update: true
+packages:
+  - curl
+  - tar
+  - gzip
+  - git
+  - python3
+  - python3-pip
+  - openssl-libs
+  - krb5-libs
+  - zlib-ng-compat
+  - libicu
+  - atk
+  - at-spi2-atk
+  - at-spi2-core
+  - cups-libs
+  - libXcomposite
+  - libXdamage
+  - libXfixes
+  - libXi
+  - libXrandr
+  - libXtst
+  - libdrm
+  - mesa-libgbm
+  - pango
+  - alsa-lib
+  - libxkbcommon
+  - gtk3
+  - nss
+
+write_files:
+  - path: /usr/local/sbin/setup-wvd-github-runner.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      RUNNER_USER="opc"
+      RUNNER_HOME="/home/${RUNNER_USER}"
+      RUNNER_DIR="${RUNNER_HOME}/actions-runner"
+      RUNNER_VERSION="2.334.0"
+      RUNNER_ARCH="x64"
+      REPO_URL="https://github.com/exkuretrol/wizardry-daphne-store-autocollector"
+
+      RUNNER_LABELS="self-hosted,linux,oci,jp"
+      SWAP_FILE="/swapfile"
+
+      install -d -o "${RUNNER_USER}" -g "${RUNNER_USER}" "${RUNNER_DIR}"
+      cd "${RUNNER_DIR}"
+
+      archive="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
+      url="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${archive}"
+      if [ ! -f "${archive}" ]; then
+        sudo -u "${RUNNER_USER}" curl -L -o "${archive}" "${url}"
+      fi
+
+      if [ ! -x ./config.sh ]; then
+        sudo -u "${RUNNER_USER}" tar xzf "${archive}"
+      fi
+
+      # Oracle Linux enables SELinux. systemd may refuse to execute runner
+      # scripts labeled user_home_t from /home, so label the runner tree as
+      # executable content before installing/starting the service.
+      if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then
+        chcon -R -t bin_t "${RUNNER_DIR}" || true
+      fi
+
+      # Chromium plus the runner can exceed small Always Free RAM. Keep swap
+      # persistent across the scheduled pre-run reboot.
+      if ! swapon --show | grep -q "${SWAP_FILE}"; then
+        fallocate -l 2G "${SWAP_FILE}" || dd if=/dev/zero of="${SWAP_FILE}" bs=1M count=2048
+        chmod 600 "${SWAP_FILE}"
+        mkswap "${SWAP_FILE}"
+        swapon "${SWAP_FILE}"
+      fi
+      if ! grep -q "^${SWAP_FILE} " /etc/fstab; then
+        echo "${SWAP_FILE} none swap sw 0 0" >> /etc/fstab
+      fi
+
+      # Best-effort dependency install. Oracle Linux 10 may not have lttng-ust;
+      # the runner can still work for this Python/Playwright workflow.
+      ./bin/installdependencies.sh || true
+
+      # Reboot one hour before the scheduled JP collector workflow.
+      tmp="$(mktemp)"
+      crontab -l 2>/dev/null | grep -v "wvd-pre-run-reboot" > "${tmp}" || true
+      echo "0 10 * * 1 /usr/sbin/reboot # wvd-pre-run-reboot" >> "${tmp}"
+      crontab "${tmp}"
+      rm -f "${tmp}"
+
+      cat >/root/wvd-runner-next-steps.txt <<EOF
+      Runner files are ready at:
+        ${RUNNER_DIR}
+
+      Finish registration:
+        cd ${RUNNER_DIR}
+        ./config.sh --url ${REPO_URL} --token YOUR_TOKEN --labels ${RUNNER_LABELS}
+        sudo ./svc.sh install ${RUNNER_USER}
+        sudo chcon -R -t bin_t ${RUNNER_DIR}
+        sudo ./svc.sh start
+        sudo ./svc.sh status
+
+      Add repository secrets:
+        WIZARDRY_JP_EMAIL
+        WIZARDRY_JP_PASSWORD
+
+      The workflow will check out the repository with actions/checkout.
+      EOF
+
+runcmd:
+  - /usr/local/sbin/setup-wvd-github-runner.sh
+
+final_message: "WVD JP GitHub runner cloud-init finished. See /root/wvd-runner-next-steps.txt."

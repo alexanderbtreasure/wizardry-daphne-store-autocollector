@@ -174,3 +174,11 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+# Playwright run artifacts — traces/screenshots contain the logged-in session and PII. Never commit.
+artifacts/
+.playwright-cli/
+trace_jp.zip
+
+# Generated on the VM by setup_vm.sh (no secrets, but per-host).
+run_jp.sh

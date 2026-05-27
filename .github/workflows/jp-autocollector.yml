@@ -1,0 +1,63 @@
+name: Japan Webstore Autocollector
+
+on:
+  push:
+    branches:
+      - feat/jp-webstore
+    paths:
+      - ".github/workflows/jp-autocollector.yml"
+      - "main_jp.py"
+      - "requirements.txt"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jp-webstore-autocollector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    # Must run on a self-hosted runner with a Japan IP.
+    runs-on: [self-hosted, linux, oci, jp]
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ensure swap
+        run: |
+          if ! swapon --show | grep -q '/swapfile'; then
+            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          if ! grep -q '^/swapfile ' /etc/fstab; then
+            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+          fi
+          free -h
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/playwright install chromium
+
+      - name: Run JP autocollector
+        env:
+          WIZARDRY_JP_EMAIL: ${{ secrets.WIZARDRY_JP_EMAIL }}
+          WIZARDRY_JP_PASSWORD: ${{ secrets.WIZARDRY_JP_PASSWORD }}
+          WIZARDRY_LOGIN_WAIT_MS: "20000"
+          WIZARDRY_BLANK_WAIT_MS: "3000"
+          WIZARDRY_PRODUCT_RECOVERY_ATTEMPTS: "4"
+          WIZARDRY_PRODUCT_NAV_ATTEMPTS: "3"
+        run: |
+          if [ -z "$WIZARDRY_JP_EMAIL" ] || [ -z "$WIZARDRY_JP_PASSWORD" ]; then
+            echo "::error::Set WIZARDRY_JP_EMAIL and WIZARDRY_JP_PASSWORD repository secrets."
+            exit 1
+          fi
+          timeout 240s nice -n 10 .venv/bin/python main_jp.py
